@@ -1,0 +1,117 @@
+name: Build AbuQaoud Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'AbuQaoudAndroid_Project.zip'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          if [ ! -d "$ANDROID_HOME" ]; then
+            echo "ERROR: Android SDK directory does not exist: $ANDROID_HOME"
+            exit 1
+          fi
+
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          if [ -z "$SDKMANAGER" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager was not found."
+            find "$ANDROID_HOME" -maxdepth 4 -type d -print | head -100 || true
+            exit 1
+          fi
+
+          echo "Using SDK manager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Extract and verify project
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/AbuQaoudAndroid_Project.zip"
+
+          rm -rf "$GITHUB_WORKSPACE/buildsrc"
+          mkdir -p "$GITHUB_WORKSPACE/buildsrc"
+          unzip -q "$GITHUB_WORKSPACE/AbuQaoudAndroid_Project.zip" -d "$GITHUB_WORKSPACE/buildsrc"
+
+          PROJECT="$GITHUB_WORKSPACE/buildsrc/AbuQaoudAndroid"
+          for FILE in \
+            "$PROJECT/settings.gradle.kts" \
+            "$PROJECT/build.gradle.kts" \
+            "$PROJECT/app/build.gradle.kts" \
+            "$PROJECT/app/src/main/AndroidManifest.xml" \
+            "$PROJECT/app/src/main/java/com/abuqaoud/platform/MainActivity.kt" \
+            "$PROJECT/app/src/main/assets/index.html"; do
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: Required project file is missing: $FILE"
+              exit 1
+            fi
+          done
+          echo "Project structure verified."
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.13'
+          validate-wrappers: false
+
+      - name: Build debug APK
+        working-directory: buildsrc/AbuQaoudAndroid
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+          gradle --no-daemon --stacktrace --info --console=plain :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AbuQaoud-Android-APK
+          path: buildsrc/AbuQaoudAndroid/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build reports if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AbuQaoud-Build-Diagnostics
+          path: |
+            buildsrc/AbuQaoudAndroid/**/build/reports/**
+            buildsrc/AbuQaoudAndroid/**/build/outputs/logs/**
+          if-no-files-found: ignore
+          retention-days: 7
